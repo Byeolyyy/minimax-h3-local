@@ -25,7 +25,6 @@ class DirectGenerationTests(unittest.TestCase):
         self.patches = [patch.object(server, 'DATA', Path(self.temp.name)),
                         patch.object(server, 'JOBS', {}), patch.object(server, 'ACTIVE', None),
                         patch.object(server, 'PROCESS', None), patch.object(server, 'WORKER', None),
-                        patch.object(server, 'CLIENTS', {}), patch.object(server, 'LAST_VIEW', time.monotonic()),
                         patch.object(server, 'advanced_process', return_value=None)]
         for item in self.patches:
             item.start()
@@ -127,7 +126,7 @@ class DirectGenerationTests(unittest.TestCase):
         (folder / 'output').mkdir(parents=True)
         (folder / 'output/test.mp4').write_bytes(b'fixture-only-no-video-generation')
         job = {'id': job_id, 'status': status, 'created': time.time(), 'stage': status,
-               'result': 'test.mp4'}
+               'result': 'test.mp4', 'finished': time.time()}
         if saved is not None:
             job['saved'] = saved
         server.JOBS[job_id] = job
@@ -157,11 +156,13 @@ class DirectGenerationTests(unittest.TestCase):
             response = self.client.post('/api/jobs', json={'prompt': 'fixture task, never run'})
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()['saved'])
-        self.assertFalse(unsaved.exists())
+        self.assertFalse((unsaved / 'output').exists())
+        self.assertEqual(server.JOBS['a' * 24]['status'], 'discarded')
+        self.assertTrue((unsaved / 'job.json').exists())
         self.assertTrue(saved.exists())
         self.assertTrue(legacy.exists())
 
-    def test_close_waits_for_other_tabs_and_refresh_grace(self):
+    def test_closed_pages_keep_completed_preview_available(self):
         folder = self.fixture_job('a' * 24)
         first, second = '1' * 32, '2' * 32
         with patch.object(server.time, 'monotonic', return_value=100):
@@ -177,21 +178,21 @@ class DirectGenerationTests(unittest.TestCase):
             self.assertTrue(folder.exists())
         with patch.object(server.time, 'monotonic', return_value=132):
             server.cleanup_abandoned_previews()
-            self.assertFalse(folder.exists())
+            self.assertTrue((folder / 'output/test.mp4').exists())
 
-    def test_lost_connection_cancels_before_deleting_active_files(self):
+    def test_lost_connection_never_cancels_or_cleans_active_files(self):
         folder = self.fixture_job('a' * 24, status='running')
         server.ACTIVE = 'a' * 24
-        server.CLIENTS['1' * 32] = 100
-        server.LAST_VIEW = 100
-        with patch.object(server.time, 'monotonic', return_value=281):
+        self.client.post('/api/session/close', json={'client_id': '1' * 32})
+        with patch.object(server.time, 'time', return_value=time.time() + 3 * 86400):
             server.cleanup_abandoned_previews()
-        self.assertTrue(server.CANCEL.is_set())
-        self.assertTrue(folder.exists())
+        self.assertFalse(server.CANCEL.is_set())
+        self.assertTrue((folder / 'output/test.mp4').exists())
         server.ACTIVE = None
         server.JOBS['a' * 24]['status'] = 'cancelled'
         server.cleanup_temporary_jobs()
-        self.assertFalse(folder.exists())
+        self.assertFalse((folder / 'output').exists())
+        self.assertEqual(server.JOBS['a' * 24]['status'], 'cancelled')
 
     def test_crash_recovery_only_removes_explicitly_unsaved_jobs(self):
         unsaved = self.fixture_job('a' * 24, status='running')
@@ -199,7 +200,10 @@ class DirectGenerationTests(unittest.TestCase):
         legacy = self.fixture_job('c' * 24, saved=None)
         removed = server.cleanup_unsaved_on_disk(server.DATA)
         self.assertEqual(removed, ['a' * 24])
-        self.assertFalse(unsaved.exists())
+        self.assertFalse((unsaved / 'output').exists())
+        restored = json.loads((unsaved / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(restored['status'], 'interrupted')
+        self.assertIn('没有完成', restored['error'])
         self.assertTrue(saved.exists())
         self.assertTrue(legacy.exists())
         with self.assertRaises(ValueError):
@@ -209,8 +213,45 @@ class DirectGenerationTests(unittest.TestCase):
         with TestClient(server.app):
             unsaved = self.fixture_job('a' * 24)
             saved = self.fixture_job('b' * 24, saved=True)
-        self.assertFalse(unsaved.exists())
+        self.assertFalse((unsaved / 'output').exists())
+        self.assertTrue((unsaved / 'job.json').exists())
         self.assertTrue(saved.exists())
+
+    def test_expiry_starts_at_completion_and_keeps_diagnostics(self):
+        folder = self.fixture_job('a' * 24)
+        finished = server.JOBS['a' * 24]['finished']
+        server.JOBS['a' * 24]['created'] = finished - 2 * 86400
+        (folder / 'run.log').write_bytes(b'x' * 100000 + b'completion log')
+        with patch.object(server.time, 'time', return_value=finished + 3 * 3600):
+            server.cleanup_abandoned_previews()
+        self.assertTrue((folder / 'output/test.mp4').exists())
+        with patch.object(server.time, 'time', return_value=finished + 86401):
+            server.cleanup_abandoned_previews()
+        self.assertFalse((folder / 'output').exists())
+        self.assertEqual((folder / 'run.log').stat().st_size, 65536)
+        self.assertEqual(server.JOBS['a' * 24]['status'], 'discarded')
+        self.assertIn('24 小时', server.JOBS['a' * 24]['cleanup_reason'])
+        self.assertIn('completion log', self.client.get('/api/jobs/' + 'a' * 24 + '/log').json()['text'])
+
+    def test_failed_job_keeps_error_and_log_after_cleanup_and_restart(self):
+        folder = self.fixture_job('a' * 24, status='failed')
+        server.JOBS['a' * 24]['error'] = 'fixture CUDA allocation error'
+        (folder / 'run.log').write_text('RuntimeError: fixture CUDA allocation error', encoding='utf-8')
+        server.cleanup_temporary_jobs()
+        self.assertFalse((folder / 'output').exists())
+        server.JOBS.clear()
+        server.restore_jobs()
+        self.assertEqual(server.JOBS['a' * 24]['status'], 'failed')
+        self.assertIn('CUDA', server.JOBS['a' * 24]['error'])
+        self.assertIn('CUDA', self.client.get('/api/jobs/' + 'a' * 24 + '/log').json()['text'])
+        self.assertEqual(self.client.get('/api/jobs/' + 'b' * 24 + '/log').status_code, 410)
+
+    def test_diagnostic_retention_is_bounded(self):
+        for number in range(32):
+            self.fixture_job(f'{number:024x}', status='failed')
+        server.cleanup_temporary_jobs()
+        self.assertEqual(len(server.JOBS), 30)
+        self.assertEqual(len(list(server.DATA.iterdir())), 30)
 
     def test_long_prompt_is_written_verbatim_and_mismatch_never_launches(self):
         prompt = ('雨中的城市街道，一位成年人撑伞走过街角，镜头缓慢跟随。\n\n' * 150).strip()

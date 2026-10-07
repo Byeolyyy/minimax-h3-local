@@ -54,7 +54,7 @@ a{color:var(--accent)}[hidden]{display:none!important}@media(max-width:600px){ma
 <progress id="progress" max="1" value="0" hidden></progress>
 <div id="preview"></div>
 <div class="row" style="margin-top:12px"><button id="cancel" hidden>停止生成</button><button id="save-video" class="primary" hidden>保存视频</button><a id="download" hidden>下载已保存视频</a><button id="discard" hidden>删除预览</button></div>
-<p id="retention" class="hint">视频先临时预览，点击“保存视频”才保留。未保存的内容会在生成下一条、关闭所有页面或退出程序后清理。</p>
+<p id="retention" class="hint">切换或关闭页面不会中断生成。视频完成后可临时预览，点击“保存视频”才长期保留；未保存的视频在下一次生成、手动删除、退出程序或完成满 24 小时后清理。</p>
 <details id="log-details"><summary>运行日志</summary><pre id="log">暂无日志</pre></details>
 </section>
 <details class="panel"><summary>生成记录</summary><div id="history"></div></details>
@@ -96,7 +96,7 @@ function render(){
   $('download').hidden=!key||job.saved===false;
   $('discard').hidden=!key||job.saved!==false;
   $('discard').disabled=saving;
-  $('retention').textContent=key&&job.saved!==false?'已保留在本地，可点击“下载已保存视频”另存。':'视频先临时预览，点击“保存视频”才保留。未保存的内容会在生成下一条、关闭所有页面或退出程序后清理。';
+  $('retention').textContent=key&&job.saved!==false?'已保留在本地，可点击“下载已保存视频”另存。':'切换或关闭页面不会中断生成。点击“保存视频”才长期保留；未保存的视频在下一次生成、手动删除、退出程序或完成满 24 小时后清理。';
   if(key)$('download').href=`/api/jobs/${key}/media?download=true`;
   $('history').replaceChildren();
   for(const j of state.jobs){
@@ -107,7 +107,12 @@ function render(){
   }
 }
 function showError(error){$('error').textContent=error.message;}
-async function loadLog(){if($('log-details').open)$('log').textContent=selected?(await api(`/api/jobs/${selected}/log`)).text||'等待模型输出日志…':'暂无日志';}
+async function loadLog(){
+  if(!$('log-details').open)return;
+  if(!selected){$('log').textContent='暂无日志';return;}
+  try{$('log').textContent=(await api(`/api/jobs/${selected}/log`)).text||'该任务暂无日志输出';}
+  catch(error){$('log').textContent=error.message;}
+}
 async function poll(){
   if(polling)return;polling=true;
   const version=stateVersion;
@@ -151,9 +156,6 @@ $('discard').onclick=async()=>{
   if(!selected||saving)return;
   try{await api(`/api/jobs/${selected}`,'DELETE');if(selected===currentJobId)rememberJob(null);selected=null;viewingHistory=false;await poll()}catch(error){showError(error)}
 };
-window.addEventListener('pagehide',()=>{
-  navigator.sendBeacon('/api/session/close',new Blob([JSON.stringify({client_id:clientId})],{type:'application/json'}));
-});
 window.addEventListener('pageshow',()=>poll());
 $('log-details').ontoggle=()=>loadLog().catch(showError);
 const qualityPresets={draft:{resolution:'640x384',steps:8},balanced:{resolution:'640x384',steps:12},quality:{resolution:'832x480',steps:20}};

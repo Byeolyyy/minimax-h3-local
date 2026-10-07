@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from launch_h3 import configure_local_proxy_bypass
-from temporary_outputs import cleanup_unsaved_on_disk, remove_job_directory, server_lock
+from temporary_outputs import cleanup_unsaved_on_disk, discard_job_media, prune_diagnostics, remove_job_directory, server_lock
 
 ROOT = Path(os.environ.get("H3_ROOT", Path(__file__).resolve().parents[1])).resolve()
 HERE = Path(__file__).resolve().parent
@@ -34,11 +34,8 @@ PROCESS: subprocess.Popen | None = None
 WORKER: threading.Thread | None = None
 CANCEL = threading.Event()
 CLEANER_STOP = threading.Event()
-CLIENTS: dict[str, float] = {}
-LAST_VIEW = time.monotonic()
-CLOSE_GRACE = 15
-CLIENT_TIMEOUT = 180
-TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+PREVIEW_TTL = 24 * 60 * 60
+TERMINAL = {"completed", "failed", "cancelled", "interrupted", "discarded"}
 # H3's native 24 fps frame grid: 17*n + 5, minimum 107 frames.
 RESOLUTIONS = {"640x384", "832x480", "384x640", "480x832", "512x512"}
 
@@ -174,29 +171,25 @@ def public_job(job: dict) -> dict:
     return out
 
 
-def cleanup_temporary_jobs():
+def cleanup_temporary_jobs(reason='开始新任务', expired_only=False):
     """Caller holds LOCK; never remove a live worker's files or a saved result."""
     for job_id, job in list(JOBS.items()):
+        if expired_only and (job['status'] != 'completed' or time.time() - job.get('finished', time.time()) < PREVIEW_TTL):
+            continue
         if job.get('saved') is False and job_id != ACTIVE and job['status'] in TERMINAL:
             try:
-                remove_job_directory(DATA, job_id)
+                discard_job_media(DATA, job, reason)
             except OSError:
                 continue  # A video reader may hold the file; retry on next pass.
-            JOBS.pop(job_id, None)
+    for job_id in prune_diagnostics(DATA):
+        JOBS.pop(job_id, None)
 
 
 def cleanup_abandoned_previews():
+    # Browser presence is not proof that a user has abandoned a GPU job.
+    # Background timers, sleep, network changes and page reloads are normal.
     with LOCK:
-        now = time.monotonic()
-        for client_id, seen in list(CLIENTS.items()):
-            if now - seen > CLIENT_TIMEOUT:
-                CLIENTS.pop(client_id, None)
-        if CLIENTS or now - LAST_VIEW < CLOSE_GRACE:
-            return
-        if ACTIVE:
-            # Let the worker terminate its child before deleting output files.
-            CANCEL.set()
-        cleanup_temporary_jobs()
+        cleanup_temporary_jobs('完成后超过 24 小时未保存', expired_only=True)
 
 
 def cleanup_loop():
@@ -257,6 +250,11 @@ def run_generation(job_id: str):
             save(job)
             PROCESS = None
             ACTIVE = None
+            if job['status'] in {'failed', 'cancelled'}:
+                try:
+                    discard_job_media(DATA, job, '生成失败或已手动停止')
+                except OSError:
+                    pass
 
 
 @asynccontextmanager
@@ -276,7 +274,7 @@ async def lifespan(app):
             if WORKER:
                 WORKER.join(timeout=15)
             with LOCK:
-                cleanup_temporary_jobs()
+                cleanup_temporary_jobs('程序退出')
 
 
 app = FastAPI(lifespan=lifespan)
@@ -306,11 +304,7 @@ def health():
 
 @app.get("/api/state")
 def state(client_id: str = ''):
-    global LAST_VIEW
     with LOCK:
-        if re.fullmatch(r'[0-9a-f]{32}', client_id):
-            LAST_VIEW = time.monotonic()
-            CLIENTS[client_id] = LAST_VIEW
         return {"active": ACTIVE, "advanced": advanced_process() is not None,
                 "jobs": [public_job(j) for j in sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)][:30]}
 
@@ -321,11 +315,8 @@ class ClientClose(BaseModel):
 
 @app.post('/api/session/close')
 def close_client(req: ClientClose):
-    global LAST_VIEW
-    with LOCK:
-        CLIENTS.pop(req.client_id, None)
-        LAST_VIEW = time.monotonic()
-    return {'ok': True}
+    # Compatibility with already-open older pages: never cancel from pagehide.
+    return {'ok': True, 'generation_continues': True}
 
 
 @app.post("/api/plan")
@@ -403,6 +394,10 @@ def delete(job_id: str):
     path = job_path(job_id)
     cancel_active(job_id)
     with LOCK:
+        job = JOBS.get(job_id)
+        if job and job.get('saved') is False:
+            discard_job_media(DATA, job, '用户删除预览')
+            return {"ok": True}
         if path.exists():
             remove_job_directory(DATA, job_id)
         JOBS.pop(job_id, None)
@@ -427,6 +422,9 @@ def keep_video(job_id: str):
 
 @app.get("/api/jobs/{job_id}/log")
 def logs(job_id: str):
+    job_path(job_id)
+    if job_id not in JOBS:
+        raise HTTPException(410, '该任务的记录和日志已被旧版清理，无法恢复。新版会保留最近 30 条诊断记录。')
     return {"text": log_tail(job_id, 6500)}
 
 
