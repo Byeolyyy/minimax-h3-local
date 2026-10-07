@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MiniMax H3 · 本地生成</title>
+<style>
+:root{color-scheme:light;--ink:#263128;--muted:#697567;--line:#dce3d8;--accent:#3d6149}
+*{box-sizing:border-box}body{margin:0;background:#f5f6f0;color:var(--ink);font:15px/1.7 "Microsoft YaHei",system-ui,sans-serif}
+main{max-width:1040px;margin:40px auto;padding:0 20px}h1{font-size:26px;margin:0}p{margin:6px 0 20px;color:var(--muted)}
+.panel{background:white;border:1px solid var(--line);border-radius:16px;padding:24px;margin-top:20px}
+label{display:block;margin-bottom:7px;font-weight:600}button,input,select,textarea{font:inherit;color:inherit}
+textarea,input,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fcfcfa}
+textarea{min-height:190px;resize:vertical}button{border:1px solid var(--line);border-radius:8px;padding:10px 18px;background:white;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #9ab88a;outline-offset:2px}
+.primary{background:var(--accent);color:white;border:0;min-width:150px}.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.parameters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}.hint{font-size:13px;color:var(--muted)}
+details{margin:16px 0}summary{cursor:pointer;color:var(--muted)}.error{color:#a13f36;white-space:pre-wrap}
+video,img{width:100%;max-height:540px;background:#18211b;border-radius:10px}progress{width:100%;accent-color:var(--accent)}
+#status{white-space:pre-wrap}#history{display:flex;gap:8px;flex-wrap:wrap}.job{text-align:left;font-size:13px}.selected{border-color:var(--accent);background:#edf3e7}
+pre{white-space:pre-wrap;overflow:auto;max-height:260px;word-break:break-word;background:#f5f6f0;padding:12px;font-size:12px}
+a{color:var(--accent)}[hidden]{display:none!important}@media(max-width:600px){main{margin:22px auto}.panel{padding:18px}.parameters{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>MiniMax H3 · 本地生成</h1>
+<p>输入提示词，生成视频。</p>
+<section class="panel">
+<form id="form">
+<label for="prompt">提示词</label>
+<textarea id="prompt" required maxlength="20000" placeholder="例如：清晨竹林里，一只小熊猫坐在树枝上，缓缓转头看向镜头。柔和阳光，写实风格，镜头慢慢推进。"></textarea>
+<div class="parameters">
+<div><label for="seconds">视频时长（秒）</label><input id="seconds" type="number" min="4.5" step="any" value="5" required placeholder="例如 30、60、120"><div id="duration-hint" class="hint" aria-live="polite"></div></div>
+<div><label for="quality">画质</label><select id="quality"><option value="draft">快速预览 · 640×384 · 8 步</option><option value="balanced">日常画质 · 640×384 · 12 步</option><option value="quality" selected>精细画质 · 832×480 · 20 步</option><option value="custom">自定义参数</option></select><div class="hint">更高分辨率和更多采样步数需要更长时间。</div></div>
+</div>
+<details>
+<summary>更多参数 · 分辨率、采样步数、随机种子</summary>
+<div class="parameters">
+<div><label for="resolution">分辨率</label><select id="resolution"><option value="832x480">832×480 · 横屏</option><option value="640x384">640×384 · 横屏</option><option value="480x832">480×832 · 竖屏</option><option value="384x640">384×640 · 竖屏</option><option value="512x512">512×512 · 方形</option></select></div>
+<div><label for="steps">采样步数</label><input id="steps" type="number" min="1" max="50" step="1" value="20" required></div>
+<div><label for="seed">随机种子</label><input id="seed" type="number" min="0" max="2147483647" step="1" placeholder="留空则随机"></div>
+</div>
+<p class="hint">可自定义秒数，最短约 4.5 秒。长视频沿用同一段提示词连续生成，不经过分镜助手。时长越长，耗时和内存占用越高，画面也可能逐渐变化。</p>
+</details>
+<div class="row"><button class="primary" id="generate" type="submit">生成视频</button><span class="hint" id="connection" role="status">正在连接本地服务…</span></div>
+<div id="error" class="error" role="alert"></div>
+</form>
+</section>
+<section class="panel" aria-label="生成结果">
+<div id="status" role="status">生成后将在这里显示结果。</div>
+<div id="result-info" class="hint"></div>
+<details id="submitted-details" hidden><summary>本次提交的提示词</summary><pre id="submitted-prompt"></pre></details>
+<progress id="progress" max="1" value="0" hidden></progress>
+<div id="preview"></div>
+<div class="row" style="margin-top:12px"><button id="cancel" hidden>停止生成</button><button id="save-video" class="primary" hidden>保存视频</button><a id="download" hidden>下载已保存视频</a><button id="discard" hidden>删除预览</button></div>
+<p id="retention" class="hint">视频先临时预览，点击“保存视频”才保留。未保存的内容会在生成下一条、关闭所有页面或退出程序后清理。</p>
+<details id="log-details"><summary>运行日志</summary><pre id="log">暂无日志</pre></details>
+</section>
+<details class="panel"><summary>生成记录</summary><div id="history"></div></details>
+<p class="hint" style="margin-top:16px">本机运行 · 用完双击 Stop-H3.bat 关闭后台</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const clientId=crypto.randomUUID().replaceAll('-','');
+const currentJobKey='h3-current-job';
+let currentJobId=sessionStorage.getItem(currentJobKey),selected=currentJobId;
+let state={jobs:[],active:null},mediaKey=null,submitting=false,polling=false,saving=false;
+let stateVersion=0,viewingHistory=false,submissionError='';
+function rememberJob(id){currentJobId=id;if(id)sessionStorage.setItem(currentJobKey,id);else sessionStorage.removeItem(currentJobKey);}
+async function api(path,method='GET',body){
+  const response=await fetch(path,{method,cache:'no-store',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+  const data=await response.json();
+  if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:Array.isArray(data.detail)?data.detail.map(e=>`${e.loc?.slice(1).join('.')||'参数'}：${e.msg}`).join('\n'):'请求失败，请检查输入。');
+  return data;
+}
+function render(){
+  $('generate').disabled=submitting||saving||!!state.active||!!state.advanced;
+  $('generate').textContent=state.active?'正在生成…':'生成视频';
+  const job=submitting||submissionError?null:state.jobs.find(j=>j.id===selected);
+  $('cancel').hidden=!state.active;
+  $('cancel').disabled=state.jobs.find(j=>j.id===state.active)?.status==='cancelling';
+  $('progress').hidden=!job||!['running','cancelling'].includes(job.status);
+  $('progress').value=job?.progress||0;
+  $('status').textContent=submitting?'正在提交当前提示词，等待任务确认…':submissionError?'本次提交失败：'+submissionError:job?[viewingHistory?'历史任务':'当前任务',job.stage,job.step_text,`用时 ${job.elapsed} 秒`,job.error].filter(Boolean).join(' · '):selected?'当前任务已不在后台记录中，可能已被清理或后台重启；没有可显示的当前结果。':'尚未提交任务。输入提示词后点击“生成视频”；旧作品可在生成记录中查看。';
+  $('result-info').textContent=job?`提交于 ${new Date(job.created*1000).toLocaleString('zh-CN')} · 视频约 ${job.plan?.seconds??'?'} 秒 · ${job.plan?.resolution??''} · ${job.plan?.steps??'?'} 步 · 提示词 ${job.request?.prompt?.length??0} 字符`:'';
+  $('submitted-details').hidden=!job;
+  $('submitted-prompt').textContent=job?.request?.prompt||'';
+  const key=job?.status==='completed'?job.id:null;
+  if(key!==mediaKey){
+    mediaKey=key;$('preview').replaceChildren();
+    if(key){const video=document.createElement(/\.(png|jpe?g|webp)$/i.test(job.result)?'img':'video');video.src=`/api/jobs/${key}/media`;video.controls=true;$('preview').append(video);}
+  }
+  $('save-video').hidden=!key||job.saved!==false;
+  $('save-video').disabled=saving;
+  $('download').hidden=!key||job.saved===false;
+  $('discard').hidden=!key||job.saved!==false;
+  $('discard').disabled=saving;
+  $('retention').textContent=key&&job.saved!==false?'已保留在本地，可点击“下载已保存视频”另存。':'视频先临时预览，点击“保存视频”才保留。未保存的内容会在生成下一条、关闭所有页面或退出程序后清理。';
+  if(key)$('download').href=`/api/jobs/${key}/media?download=true`;
+  $('history').replaceChildren();
+  for(const j of state.jobs){
+    const button=document.createElement('button');button.className='job'+(j.id===selected?' selected':'');
+    button.textContent=`${new Date(j.created*1000).toLocaleString('zh-CN')} · ${j.stage} · ${j.saved===false?'未保存':'已保留'}`;
+    button.disabled=submitting;
+    button.onclick=()=>{selected=j.id;viewingHistory=true;submissionError='';render();loadLog().catch(showError)};$('history').append(button);
+  }
+}
+function showError(error){$('error').textContent=error.message;}
+async function loadLog(){if($('log-details').open)$('log').textContent=selected?(await api(`/api/jobs/${selected}/log`)).text||'等待模型输出日志…':'暂无日志';}
+async function poll(){
+  if(polling)return;polling=true;
+  const version=stateVersion;
+  try{
+    const snapshot=await api('/api/state?client_id='+clientId);
+    // A poll issued before submission must not overwrite the acknowledged job.
+    if(version!==stateVersion||submitting)return;
+    state=snapshot;
+    $('connection').textContent=state.advanced?'旧版后台仍在运行，请先用 Stop-H3.bat 关闭，再重新启动。':'本地服务已连接';
+    if(!viewingHistory){
+      if(state.active&&!submissionError)rememberJob(state.active);
+      selected=currentJobId;
+    }
+    render();await loadLog();
+  }catch(error){$('connection').textContent='服务未连接，请运行 Start-H3.bat';$('generate').disabled=true;}
+  finally{polling=false;}
+}
+$('form').onsubmit=async event=>{
+  event.preventDefault();if(submitting||saving||state.active)return;
+  $('error').textContent='';submissionError='';submitting=true;stateVersion++;
+  viewingHistory=false;selected=null;rememberJob(null);render();
+  try{
+    const job=await api('/api/jobs','POST',{prompt:$('prompt').value,seconds:Number($('seconds').value),resolution:$('resolution').value,num_inference_steps:Number($('steps').value),seed:$('seed').value===''?null:Number($('seed').value)});
+    if(!job.id||!job.request)throw Error('后台未返回有效任务，尚未确认生成。');
+    stateVersion++;rememberJob(job.id);selected=job.id;state.active=job.id;state.jobs.unshift(job);
+  }catch(error){submissionError=error.message;showError(error)}finally{submitting=false;render();}
+};
+$('form').addEventListener('invalid',event=>{
+  const field=event.target;
+  if(field.closest('details'))field.closest('details').open=true;
+  const label=document.querySelector(`label[for="${field.id}"]`)?.textContent||'输入';
+  submissionError=`${label}：${field.validationMessage}`;showError(new Error(submissionError));render();
+},true);
+$('cancel').onclick=async()=>{if(!state.active)return;$('cancel').disabled=true;try{await api(`/api/jobs/${state.active}/cancel`,'POST');await poll()}catch(error){showError(error);$('cancel').disabled=false}};
+$('save-video').onclick=async()=>{
+  if(!selected||saving)return;saving=true;render();
+  try{const job=await api(`/api/jobs/${selected}/save`,'POST');state.jobs=state.jobs.map(j=>j.id===job.id?job:j);render();}
+  catch(error){showError(error)}finally{saving=false;render();}
+};
+$('discard').onclick=async()=>{
+  if(!selected||saving)return;
+  try{await api(`/api/jobs/${selected}`,'DELETE');if(selected===currentJobId)rememberJob(null);selected=null;viewingHistory=false;await poll()}catch(error){showError(error)}
+};
+window.addEventListener('pagehide',()=>{
+  navigator.sendBeacon('/api/session/close',new Blob([JSON.stringify({client_id:clientId})],{type:'application/json'}));
+});
+window.addEventListener('pageshow',()=>poll());
+$('log-details').ontoggle=()=>loadLog().catch(showError);
+const qualityPresets={draft:{resolution:'640x384',steps:8},balanced:{resolution:'640x384',steps:12},quality:{resolution:'832x480',steps:20}};
+$('quality').onchange=()=>{
+  const preset=qualityPresets[$('quality').value];
+  if(preset){$('resolution').value=preset.resolution;$('steps').value=preset.steps;}
+  else document.querySelector('form details').open=true;
+};
+$('resolution').onchange=$('steps').oninput=()=>{$('quality').value='custom';};
+let durationRequest=0;
+async function updateDuration(){
+  const current=++durationRequest;
+  const seconds=Number($('seconds').value);
+  if(!Number.isFinite(seconds)||seconds<4.5){$('duration-hint').textContent='请输入至少 4.5 秒。';return;}
+  try{
+    const plan=await api('/api/plan','POST',{prompt:'duration preview',seconds});
+    if(current===durationRequest)$('duration-hint').textContent=`预计成片约 ${plan.seconds.toFixed(2)} 秒（24 帧/秒，按模型帧数取整）`;
+  }catch(error){if(current===durationRequest)$('duration-hint').textContent='时长换算暂不可用';}
+}
+$('seconds').oninput=updateDuration;
+updateDuration();
+poll();setInterval(poll,2000);
+</script>
+</body>
+</html>

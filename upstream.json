@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/deepbeepmeep/Wan2GP",
+  "tested_commit": "ec9566a6593727a922e516fbd0919f9b9210c949",
+  "platform": "Windows",
+  "python": "3.11",
+  "tested_gpu": "NVIDIA GeForce RTX 5070 12GB",
+  "model_type": "h3_local_heretic"
+}
